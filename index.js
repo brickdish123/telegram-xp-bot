@@ -1,8 +1,16 @@
 const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
+const express = require("express");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
+// Web server for Render
+const app = express();
+app.get("/", (req, res) => res.send("Bot is running"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+
+// Database
 const db = new sqlite3.Database('./xp.db');
 
 db.run(`CREATE TABLE IF NOT EXISTS users (
@@ -11,12 +19,16 @@ db.run(`CREATE TABLE IF NOT EXISTS users (
   level INTEGER
 )`);
 
+// Cooldown
 let cooldown = {};
+const COOLDOWN_MS = 5000;
 
+// Level formula
 function getLevelXP(level) {
-  return level * 100;
+  return 100 + (level * 50);
 }
 
+// Message XP system
 bot.on('message', (msg) => {
   if (!msg.from || msg.chat.type === 'private') return;
 
@@ -24,7 +36,7 @@ bot.on('message', (msg) => {
   const chatId = msg.chat.id;
   const name = msg.from.first_name;
 
-  if (cooldown[userId] && Date.now() - cooldown[userId] < 5000) return;
+  if (cooldown[userId] && Date.now() - cooldown[userId] < COOLDOWN_MS) return;
   cooldown[userId] = Date.now();
 
   const gainedXP = Math.floor(Math.random() * 10) + 5;
@@ -44,6 +56,7 @@ bot.on('message', (msg) => {
 
       bot.sendMessage(chatId, `🎉 ${name} reached level ${level}!`);
 
+      // Titles (safe)
       if (level === 5) bot.setChatAdministratorCustomTitle(chatId, userId, "⭐ Active");
       if (level === 10) bot.setChatAdministratorCustomTitle(chatId, userId, "🔥 Pro");
       if (level === 20) bot.setChatAdministratorCustomTitle(chatId, userId, "👑 Elite");
@@ -53,18 +66,40 @@ bot.on('message', (msg) => {
   });
 });
 
+// XP command
 bot.onText(/\/xp/, (msg) => {
   db.get(`SELECT * FROM users WHERE userId = ?`, [msg.from.id], (err, row) => {
     if (!row) return bot.sendMessage(msg.chat.id, "No XP yet.");
+
     bot.sendMessage(msg.chat.id, `⭐ Level: ${row.level}\nXP: ${row.xp}`);
   });
 });
 
+// Leaderboard with usernames (FIXED)
 bot.onText(/\/leaderboard/, (msg) => {
-  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC LIMIT 10`, (err, rows) => {
+  const chatId = msg.chat.id;
+
+  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC LIMIT 10`, async (err, rows) => {
+    if (!rows || rows.length === 0) {
+      return bot.sendMessage(chatId, "No data yet.");
+    }
+
     let text = "🏆 Leaderboard:\n\n";
-    rows.forEach((u, i) => text += `${i+1}. Level ${u.level} (${u.xp} XP)\n`);
-    bot.sendMessage(msg.chat.id, text);
+
+    for (let i = 0; i < rows.length; i++) {
+      try {
+        const user = await bot.getChatMember(chatId, rows[i].userId);
+        const name = user.user.username
+          ? "@" + user.user.username
+          : user.user.first_name;
+
+        text += `${i + 1}. ${name} — Level ${rows[i].level} (${rows[i].xp} XP)\n`;
+      } catch (e) {
+        text += `${i + 1}. Unknown — Level ${rows[i].level} (${rows[i].xp} XP)\n`;
+      }
+    }
+
+    bot.sendMessage(chatId, text);
   });
 });
 
@@ -72,10 +107,3 @@ bot.onText(/\/leaderboard/, (msg) => {
 bot.onText(/\/owner/, (msg) => {
   bot.sendMessage(msg.chat.id, "👑 Owner: brickdish");
 });
-const express = require("express");
-const app = express();
-
-app.get("/", (req, res) => res.send("Bot is running"));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
