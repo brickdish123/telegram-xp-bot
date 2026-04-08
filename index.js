@@ -1,6 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
 const express = require("express");
+const fs = require("fs");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
@@ -28,7 +29,7 @@ function getLevelXP(level) {
   return 100 + (level * 50);
 }
 
-// Message XP system
+// XP system
 bot.on('message', (msg) => {
   if (!msg.from || msg.chat.type === 'private') return;
 
@@ -56,7 +57,7 @@ bot.on('message', (msg) => {
 
       bot.sendMessage(chatId, `🎉 ${name} reached level ${level}!`);
 
-      // Titles (safe)
+      // Safe titles
       if (level === 5) bot.setChatAdministratorCustomTitle(chatId, userId, "⭐ Active");
       if (level === 10) bot.setChatAdministratorCustomTitle(chatId, userId, "🔥 Pro");
       if (level === 20) bot.setChatAdministratorCustomTitle(chatId, userId, "👑 Elite");
@@ -70,12 +71,19 @@ bot.on('message', (msg) => {
 bot.onText(/\/xp/, (msg) => {
   db.get(`SELECT * FROM users WHERE userId = ?`, [msg.from.id], (err, row) => {
     if (!row) return bot.sendMessage(msg.chat.id, "No XP yet.");
-
     bot.sendMessage(msg.chat.id, `⭐ Level: ${row.level}\nXP: ${row.xp}`);
   });
 });
 
-// Leaderboard with usernames (FIXED)
+// LEVEL command (added)
+bot.onText(/\/level/, (msg) => {
+  db.get(`SELECT * FROM users WHERE userId = ?`, [msg.from.id], (err, row) => {
+    if (!row) return bot.sendMessage(msg.chat.id, "No level yet.");
+    bot.sendMessage(msg.chat.id, `🎯 Your Level: ${row.level}`);
+  });
+});
+
+// Leaderboard with names
 bot.onText(/\/leaderboard/, (msg) => {
   const chatId = msg.chat.id;
 
@@ -94,12 +102,59 @@ bot.onText(/\/leaderboard/, (msg) => {
           : user.user.first_name;
 
         text += `${i + 1}. ${name} — Level ${rows[i].level} (${rows[i].xp} XP)\n`;
-      } catch (e) {
+      } catch {
         text += `${i + 1}. Unknown — Level ${rows[i].level} (${rows[i].xp} XP)\n`;
       }
     }
 
     bot.sendMessage(chatId, text);
+  });
+});
+
+// REPORT command
+bot.onText(/\/report/, (msg) => {
+  const chatId = msg.chat.id;
+
+  db.all(`SELECT * FROM users`, (err, rows) => {
+    if (!rows || rows.length === 0) {
+      return bot.sendMessage(chatId, "No data yet.");
+    }
+
+    let totalUsers = rows.length;
+    let totalXP = 0;
+    let totalLevels = 0;
+
+    rows.forEach(user => {
+      totalXP += user.xp;
+      totalLevels += user.level;
+    });
+
+    const avgLevel = (totalLevels / totalUsers).toFixed(2);
+
+    let text = `📊 Bot Report
+
+👥 Total Users: ${totalUsers}
+⭐ Total XP: ${totalXP}
+📈 Average Level: ${avgLevel}
+`;
+
+    bot.sendMessage(chatId, text);
+  });
+});
+
+// EXPORT command (downloads JSON file)
+bot.onText(/\/export/, (msg) => {
+  const chatId = msg.chat.id;
+
+  db.all(`SELECT * FROM users`, (err, rows) => {
+    if (!rows || rows.length === 0) {
+      return bot.sendMessage(chatId, "No data to export.");
+    }
+
+    const filePath = "./report.json";
+    fs.writeFileSync(filePath, JSON.stringify(rows, null, 2));
+
+    bot.sendDocument(chatId, filePath);
   });
 });
 
