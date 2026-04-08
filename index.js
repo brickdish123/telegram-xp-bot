@@ -2,10 +2,11 @@ const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
 const express = require("express");
 const fs = require("fs");
+const PDFDocument = require("pdfkit");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-// Web server for Render
+// Render web server
 const app = express();
 app.get("/", (req, res) => res.send("Bot is running"));
 const PORT = process.env.PORT || 3000;
@@ -75,7 +76,7 @@ bot.onText(/\/xp/, (msg) => {
   });
 });
 
-// LEVEL command (added)
+// LEVEL command
 bot.onText(/\/level/, (msg) => {
   db.get(`SELECT * FROM users WHERE userId = ?`, [msg.from.id], (err, row) => {
     if (!row) return bot.sendMessage(msg.chat.id, "No level yet.");
@@ -83,7 +84,7 @@ bot.onText(/\/level/, (msg) => {
   });
 });
 
-// Leaderboard with names
+// Leaderboard with usernames
 bot.onText(/\/leaderboard/, (msg) => {
   const chatId = msg.chat.id;
 
@@ -142,23 +143,105 @@ bot.onText(/\/report/, (msg) => {
   });
 });
 
-// EXPORT command (downloads JSON file)
-bot.onText(/\/export/, (msg) => {
+// EXPORT JSON
+bot.onText(/\/export$/, async (msg) => {
   const chatId = msg.chat.id;
 
-  db.all(`SELECT * FROM users`, (err, rows) => {
-    if (!rows || rows.length === 0) {
-      return bot.sendMessage(chatId, "No data to export.");
+  db.all(`SELECT * FROM users`, async (err, rows) => {
+    let cleanData = [];
+
+    for (let row of rows) {
+      try {
+        const user = await bot.getChatMember(chatId, row.userId);
+        const name = user.user.username
+          ? "@" + user.user.username
+          : user.user.first_name;
+
+        cleanData.push({
+          username: name,
+          level: row.level,
+          xp: row.xp
+        });
+      } catch {
+        cleanData.push({
+          username: "Unknown",
+          level: row.level,
+          xp: row.xp
+        });
+      }
     }
 
     const filePath = "./report.json";
-    fs.writeFileSync(filePath, JSON.stringify(rows, null, 2));
+    fs.writeFileSync(filePath, JSON.stringify(cleanData, null, 2));
 
     bot.sendDocument(chatId, filePath);
   });
 });
 
-// Owner command
+// EXPORT CSV
+bot.onText(/\/exportcsv/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC`, async (err, rows) => {
+    let csv = "User account,Level,XP\n";
+
+    for (let row of rows) {
+      try {
+        const user = await bot.getChatMember(chatId, row.userId);
+        const name = user.user.username
+          ? "@" + user.user.username
+          : user.user.first_name;
+
+        csv += `${name},${row.level},${row.xp}\n`;
+      } catch {
+        csv += `Unknown,${row.level},${row.xp}\n`;
+      }
+    }
+
+    fs.writeFileSync("./report.csv", csv);
+    bot.sendDocument(chatId, "./report.csv");
+  });
+});
+
+// EXPORT PDF
+bot.onText(/\/exportpdf/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC`, async (err, rows) => {
+    const doc = new PDFDocument();
+    const filePath = "./report.pdf";
+    const stream = fs.createWriteStream(filePath);
+
+    doc.pipe(stream);
+
+    doc.fontSize(16).text("XP Report", { align: "center" });
+    doc.moveDown();
+
+    doc.text("User account | Level | XP");
+    doc.moveDown(0.5);
+
+    for (let row of rows) {
+      try {
+        const user = await bot.getChatMember(chatId, row.userId);
+        const name = user.user.username
+          ? "@" + user.user.username
+          : user.user.first_name;
+
+        doc.text(`${name} | ${row.level} | ${row.xp}`);
+      } catch {
+        doc.text(`Unknown | ${row.level} | ${row.xp}`);
+      }
+    }
+
+    doc.end();
+
+    stream.on("finish", () => {
+      bot.sendDocument(chatId, filePath);
+    });
+  });
+});
+
+// Owner
 bot.onText(/\/owner/, (msg) => {
   bot.sendMessage(msg.chat.id, "👑 Owner: brickdish");
 });
