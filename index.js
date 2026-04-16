@@ -3,96 +3,111 @@ const sqlite3 = require('sqlite3').verbose();
 const express = require("express");
 const fs = require("fs");
 const PDFDocument = require("pdfkit");
+const { Document, Packer, Paragraph, Table, TableRow, TableCell } = require("docx");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-// Render web server
+// Render server
 const app = express();
-app.get("/", (req, res) => res.send("Bot is running"));
+app.get("/", (req, res) => res.send("Bot running"));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+app.listen(PORT);
 
 // Database
 const db = new sqlite3.Database('./xp.db');
 
 db.run(`CREATE TABLE IF NOT EXISTS users (
   userId TEXT PRIMARY KEY,
-  xp INTEGER,
-  level INTEGER
+  xp INTEGER
 )`);
 
-// Cooldown
-let cooldown = {};
-const COOLDOWN_MS = 5000;
+// Cooldowns
+let messageCooldown = {};
+let dailyCooldown = {};
 
-// Level formula
-function getLevelXP(level) {
-  return 100 + (level * 50);
-}
-
-// XP system
+// ================= XP SYSTEM =================
 bot.on('message', (msg) => {
   if (!msg.from || msg.chat.type === 'private') return;
 
   const userId = msg.from.id;
-  const chatId = msg.chat.id;
-  const name = msg.from.first_name;
 
-  if (cooldown[userId] && Date.now() - cooldown[userId] < COOLDOWN_MS) return;
-  cooldown[userId] = Date.now();
+  if (messageCooldown[userId] && Date.now() - messageCooldown[userId] < 5000) return;
+  messageCooldown[userId] = Date.now();
 
-  const gainedXP = Math.floor(Math.random() * 10) + 5;
+  const gainedXP = 2;
 
   db.get(`SELECT * FROM users WHERE userId = ?`, [userId], (err, row) => {
     if (!row) {
-      db.run(`INSERT INTO users VALUES (?, ?, ?)`, [userId, gainedXP, 1]);
-      return;
+      db.run(`INSERT INTO users VALUES (?, ?)`, [userId, gainedXP]);
+    } else {
+      db.run(`UPDATE users SET xp = xp + ? WHERE userId = ?`, [gainedXP, userId]);
     }
-
-    let xp = row.xp + gainedXP;
-    let level = row.level;
-
-    if (xp >= getLevelXP(level)) {
-      xp = 0;
-      level++;
-
-      bot.sendMessage(chatId, `🎉 ${name} reached level ${level}!`);
-
-      // Safe titles
-      if (level === 5) bot.setChatAdministratorCustomTitle(chatId, userId, "⭐ Active");
-      if (level === 10) bot.setChatAdministratorCustomTitle(chatId, userId, "🔥 Pro");
-      if (level === 20) bot.setChatAdministratorCustomTitle(chatId, userId, "👑 Elite");
-    }
-
-    db.run(`UPDATE users SET xp = ?, level = ? WHERE userId = ?`, [xp, level, userId]);
   });
 });
 
-// XP command
+// ================= DAILY =================
+bot.onText(/\/daily/, (msg) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const now = Date.now();
+
+  const COOLDOWN = 24 * 60 * 60 * 1000;
+
+  if (dailyCooldown[userId] && now - dailyCooldown[userId] < COOLDOWN) {
+    const remaining = COOLDOWN - (now - dailyCooldown[userId]);
+    const hours = Math.floor(remaining / 3600000);
+    const minutes = Math.floor((remaining % 3600000) / 60000);
+
+    return bot.sendMessage(chatId, `⏳ Come back in ${hours}h ${minutes}m`);
+  }
+
+  dailyCooldown[userId] = now;
+
+  const rewardXP = 10;
+
+  db.get(`SELECT * FROM users WHERE userId = ?`, [userId], (err, row) => {
+    if (!row) {
+      db.run(`INSERT INTO users VALUES (?, ?)`, [userId, rewardXP]);
+    } else {
+      db.run(`UPDATE users SET xp = xp + ? WHERE userId = ?`, [rewardXP, userId]);
+    }
+
+    bot.sendMessage(chatId, `🎁 You received ${rewardXP} XP!`);
+  });
+});
+
+// ================= REFERRAL =================
+bot.onText(/\/start (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const newUserId = msg.from.id;
+  const referrerId = match[1].replace("ref_", "");
+
+  if (newUserId == referrerId) return;
+
+  const rewardXP = 5;
+
+  db.get(`SELECT * FROM users WHERE userId = ?`, [referrerId], (err, row) => {
+    if (!row) return;
+
+    db.run(`UPDATE users SET xp = xp + ? WHERE userId = ?`, [rewardXP, referrerId]);
+
+    bot.sendMessage(chatId, `🎉 Referral successful! 5 XP awarded.`);
+  });
+});
+
+// ================= XP COMMAND =================
 bot.onText(/\/xp/, (msg) => {
   db.get(`SELECT * FROM users WHERE userId = ?`, [msg.from.id], (err, row) => {
     if (!row) return bot.sendMessage(msg.chat.id, "No XP yet.");
-    bot.sendMessage(msg.chat.id, `⭐ Level: ${row.level}\nXP: ${row.xp}`);
+    bot.sendMessage(msg.chat.id, `⭐ XP: ${row.xp}`);
   });
 });
 
-// LEVEL command
-bot.onText(/\/level/, (msg) => {
-  db.get(`SELECT * FROM users WHERE userId = ?`, [msg.from.id], (err, row) => {
-    if (!row) return bot.sendMessage(msg.chat.id, "No level yet.");
-    bot.sendMessage(msg.chat.id, `🎯 Your Level: ${row.level}`);
-  });
-});
-
-// Leaderboard with usernames
+// ================= LEADERBOARD =================
 bot.onText(/\/leaderboard/, (msg) => {
   const chatId = msg.chat.id;
 
-  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC LIMIT 10`, async (err, rows) => {
-    if (!rows || rows.length === 0) {
-      return bot.sendMessage(chatId, "No data yet.");
-    }
-
+  db.all(`SELECT * FROM users ORDER BY xp DESC LIMIT 10`, async (err, rows) => {
     let text = "🏆 Leaderboard:\n\n";
 
     for (let i = 0; i < rows.length; i++) {
@@ -102,9 +117,9 @@ bot.onText(/\/leaderboard/, (msg) => {
           ? "@" + user.user.username
           : user.user.first_name;
 
-        text += `${i + 1}. ${name} — Level ${rows[i].level} (${rows[i].xp} XP)\n`;
+        text += `${i + 1}. ${name} — ${rows[i].xp} XP\n`;
       } catch {
-        text += `${i + 1}. Unknown — Level ${rows[i].level} (${rows[i].xp} XP)\n`;
+        text += `${i + 1}. Unknown — ${rows[i].xp} XP\n`;
       }
     }
 
@@ -112,43 +127,12 @@ bot.onText(/\/leaderboard/, (msg) => {
   });
 });
 
-// REPORT command
-bot.onText(/\/report/, (msg) => {
-  const chatId = msg.chat.id;
-
-  db.all(`SELECT * FROM users`, (err, rows) => {
-    if (!rows || rows.length === 0) {
-      return bot.sendMessage(chatId, "No data yet.");
-    }
-
-    let totalUsers = rows.length;
-    let totalXP = 0;
-    let totalLevels = 0;
-
-    rows.forEach(user => {
-      totalXP += user.xp;
-      totalLevels += user.level;
-    });
-
-    const avgLevel = (totalLevels / totalUsers).toFixed(2);
-
-    let text = `📊 Bot Report
-
-👥 Total Users: ${totalUsers}
-⭐ Total XP: ${totalXP}
-📈 Average Level: ${avgLevel}
-`;
-
-    bot.sendMessage(chatId, text);
-  });
-});
-
-// EXPORT JSON
+// ================= EXPORT JSON =================
 bot.onText(/\/export$/, async (msg) => {
   const chatId = msg.chat.id;
 
-  db.all(`SELECT * FROM users`, async (err, rows) => {
-    let cleanData = [];
+  db.all(`SELECT * FROM users ORDER BY xp DESC`, async (err, rows) => {
+    let data = [];
 
     for (let row of rows) {
       try {
@@ -157,33 +141,23 @@ bot.onText(/\/export$/, async (msg) => {
           ? "@" + user.user.username
           : user.user.first_name;
 
-        cleanData.push({
-          username: name,
-          level: row.level,
-          xp: row.xp
-        });
+        data.push({ username: name, xp: row.xp });
       } catch {
-        cleanData.push({
-          username: "Unknown",
-          level: row.level,
-          xp: row.xp
-        });
+        data.push({ username: "Unknown", xp: row.xp });
       }
     }
 
-    const filePath = "./report.json";
-    fs.writeFileSync(filePath, JSON.stringify(cleanData, null, 2));
-
-    bot.sendDocument(chatId, filePath);
+    fs.writeFileSync("report.json", JSON.stringify(data, null, 2));
+    bot.sendDocument(chatId, "report.json");
   });
 });
 
-// EXPORT CSV
+// ================= EXPORT CSV =================
 bot.onText(/\/exportcsv/, async (msg) => {
   const chatId = msg.chat.id;
 
-  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC`, async (err, rows) => {
-    let csv = "User account,Level,XP\n";
+  db.all(`SELECT * FROM users ORDER BY xp DESC`, async (err, rows) => {
+    let csv = "User account,XP\n";
 
     for (let row of rows) {
       try {
@@ -192,32 +166,31 @@ bot.onText(/\/exportcsv/, async (msg) => {
           ? "@" + user.user.username
           : user.user.first_name;
 
-        csv += `${name},${row.level},${row.xp}\n`;
+        csv += `${name},${row.xp}\n`;
       } catch {
-        csv += `Unknown,${row.level},${row.xp}\n`;
+        csv += `Unknown,${row.xp}\n`;
       }
     }
 
-    fs.writeFileSync("./report.csv", csv);
-    bot.sendDocument(chatId, "./report.csv");
+    fs.writeFileSync("report.csv", csv);
+    bot.sendDocument(chatId, "report.csv");
   });
 });
 
-// EXPORT PDF
+// ================= EXPORT PDF =================
 bot.onText(/\/exportpdf/, async (msg) => {
   const chatId = msg.chat.id;
 
-  db.all(`SELECT * FROM users ORDER BY level DESC, xp DESC`, async (err, rows) => {
+  db.all(`SELECT * FROM users ORDER BY xp DESC`, async (err, rows) => {
     const doc = new PDFDocument();
-    const filePath = "./report.pdf";
-    const stream = fs.createWriteStream(filePath);
+    const stream = fs.createWriteStream("report.pdf");
 
     doc.pipe(stream);
 
     doc.fontSize(16).text("XP Report", { align: "center" });
     doc.moveDown();
 
-    doc.text("User account | Level | XP");
+    doc.text("User account | XP");
     doc.moveDown(0.5);
 
     for (let row of rows) {
@@ -227,21 +200,73 @@ bot.onText(/\/exportpdf/, async (msg) => {
           ? "@" + user.user.username
           : user.user.first_name;
 
-        doc.text(`${name} | ${row.level} | ${row.xp}`);
+        doc.text(`${name} | ${row.xp}`);
       } catch {
-        doc.text(`Unknown | ${row.level} | ${row.xp}`);
+        doc.text(`Unknown | ${row.xp}`);
       }
     }
 
     doc.end();
 
     stream.on("finish", () => {
-      bot.sendDocument(chatId, filePath);
+      bot.sendDocument(chatId, "report.pdf");
     });
   });
 });
 
-// Owner
+// ================= EXPORT DOCX =================
+bot.onText(/\/exportdocx/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  db.all(`SELECT * FROM users ORDER BY xp DESC`, async (err, rows) => {
+    const tableRows = [];
+
+    for (let row of rows) {
+      let name = "Unknown";
+      try {
+        const user = await bot.getChatMember(chatId, row.userId);
+        name = user.user.username
+          ? "@" + user.user.username
+          : user.user.first_name;
+      } catch {}
+
+      tableRows.push(
+        new TableRow({
+          children: [
+            new TableCell({ children: [new Paragraph(name)] }),
+            new TableCell({ children: [new Paragraph(String(row.xp))] })
+          ]
+        })
+      );
+    }
+
+    const doc = new Document({
+      sections: [{
+        children: [
+          new Paragraph("XP Report"),
+          new Table({
+            rows: [
+              new TableRow({
+                children: [
+                  new TableCell({ children: [new Paragraph("User")] }),
+                  new TableCell({ children: [new Paragraph("XP")] })
+                ]
+              }),
+              ...tableRows
+            ]
+          })
+        ]
+      }]
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+    fs.writeFileSync("report.docx", buffer);
+
+    bot.sendDocument(chatId, "report.docx");
+  });
+});
+
+// ================= OWNER =================
 bot.onText(/\/owner/, (msg) => {
   bot.sendMessage(msg.chat.id, "👑 Owner: brickdish");
 });
